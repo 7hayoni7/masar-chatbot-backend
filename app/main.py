@@ -29,6 +29,13 @@ from app.trips_store import fetch_trips_for_station_today
 
 app = FastAPI()
 
+
+@app.get("/health")
+def health():
+    print("HEALTH CHECK OK", flush=True)
+    return {"status": "ok"}
+
+
 # ----------------------------
 # Config
 # ----------------------------
@@ -53,7 +60,6 @@ SCH_SHOWING_TRIPS = "sch_showing_trips"
 RT_ASK_DEST = "rt_ask_dest"
 RT_SHOWING = "rt_showing"
 
-# ← جديد
 TRACK_STATE = "track_flow"
 
 LINE_META = {
@@ -64,6 +70,7 @@ LINE_META = {
     "Line5": {"name_ar": "المسار الأخضر",    "color": "#2E7D32", "icon": "line_green"},
     "Line6": {"name_ar": "المسار البنفسجي",  "color": "#6A1B9A", "icon": "line_purple"},
 }
+
 
 class AskReq(BaseModel):
     question: str
@@ -111,7 +118,6 @@ def _menu_choice_from_text(question: str) -> Optional[str]:
     if ("من " in q and " الى " in q) or ("من " in q and "إلى " in question):
         return "4"
 
-    # ← جديد
     if "تتبع" in q or "بلاغاتي" in q or "بلاغي" in q or "وين بلاغي" in q:
         return "5"
 
@@ -666,7 +672,7 @@ def route_flow(
                 origin=(float(lat), float(lon)),
                 destination=(float(start_station["lat"]), float(start_station["lon"]))
             )
-            walk_to_start  = (a.get("walk")  or {}).get("duration_min")
+            walk_to_start = (a.get("walk") or {}).get("duration_min")
             drive_to_start = (a.get("drive") or {}).get("duration_min")
         except Exception:
             pass
@@ -676,7 +682,7 @@ def route_flow(
                 origin=(float(end_station["lat"]), float(end_station["lon"])),
                 destination=(float(dest_lat), float(dest_lon)),
             )
-            walk_from_end  = (b.get("walk")  or {}).get("duration_min")
+            walk_from_end = (b.get("walk") or {}).get("duration_min")
             drive_from_end = (b.get("drive") or {}).get("duration_min")
         except Exception:
             pass
@@ -878,9 +884,6 @@ def schedule_flow(passenger_id: str, session_id: str, user_message: str) -> Dict
     }
 
 
-# ----------------------------
-# ← جديد: Track flow
-# ----------------------------
 def track_flow(passenger_id: str, session_id: str, user_message: str) -> Dict[str, Any]:
     msg = _strip_opt_prefix((user_message or "").strip())
     session = get_session(passenger_id, session_id)
@@ -892,7 +895,8 @@ def track_flow(passenger_id: str, session_id: str, user_message: str) -> Dict[st
 
     try:
         reports = get_passenger_reports(passenger_id)
-    except Exception:
+    except Exception as e:
+        print("TRACK REPORTS ERROR", type(e).__name__, str(e), flush=True)
         reports = []
 
     if not reports:
@@ -956,6 +960,8 @@ def track_flow(passenger_id: str, session_id: str, user_message: str) -> Dict[st
 # ----------------------------
 @app.post("/ask")
 def ask(req: AskReq):
+    print("ASK STARTED", req.question, req.session_id, req.passenger_id, flush=True)
+
     try:
         raw_question = (req.question or "").strip()
         question = _strip_opt_prefix(raw_question)
@@ -965,19 +971,35 @@ def ask(req: AskReq):
         lat = req.lat
         lon = req.lon
 
+        print("PARSED REQUEST", {
+            "question": question,
+            "session_id": session_id,
+            "passenger_id": passenger_id,
+            "lat": lat,
+            "lon": lon,
+        }, flush=True)
+
+        print("BEFORE GET SESSION", flush=True)
         session = get_session(passenger_id, session_id)
+        print("SESSION LOADED", session, flush=True)
+
         state = (session.get("state") or "menu")
+        print("STATE =", state, flush=True)
 
         if question.strip().lower() in ["", "menu", "start"]:
+            print("MENU REQUEST - BEFORE RESET SESSION", flush=True)
             reset_session(passenger_id, session_id)
+            print("MENU REQUEST - AFTER RESET SESSION", flush=True)
             return menu_response()
 
         if _is_exit_to_menu(question):
+            print("EXIT TO MENU - BEFORE RESET SESSION", flush=True)
             reset_session(passenger_id, session_id)
+            print("EXIT TO MENU - AFTER RESET SESSION", flush=True)
             return menu_response()
 
-        # ← track state
         if state == TRACK_STATE:
+            print("TRACK FLOW", flush=True)
             return track_flow(
                 passenger_id=passenger_id,
                 session_id=session_id,
@@ -985,6 +1007,8 @@ def ask(req: AskReq):
             )
 
         if str(state).startswith("lf_"):
+            print("LOST FOUND FLOW", flush=True)
+
             reply_text = handle_lost_found_flow(
                 session_id=session_id,
                 user_message=question,
@@ -1012,6 +1036,7 @@ def ask(req: AskReq):
             }
 
         if str(state).startswith("rt_"):
+            print("ROUTE FLOW", flush=True)
             return route_flow(
                 passenger_id=passenger_id,
                 session_id=session_id,
@@ -1021,6 +1046,7 @@ def ask(req: AskReq):
             )
 
         if state in {SCH_CHOOSE_STATION, SCH_SHOWING_TRIPS}:
+            print("SCHEDULE FLOW", flush=True)
             return schedule_flow(
                 passenger_id=passenger_id,
                 session_id=session_id,
@@ -1028,8 +1054,13 @@ def ask(req: AskReq):
             )
 
         if state == GENERAL_STATE:
+            print("GENERAL QA - BEFORE FETCH FAQ", flush=True)
             faqs = fetch_all_faq()
+            print("GENERAL QA - FAQ FETCHED", flush=True)
+
             result = ask_llm(question, faqs)
+            print("GENERAL QA - LLM DONE", flush=True)
+
             return {
                 "matched_faq_id": result.get("matched_faq_id", None),
                 "answer": result.get("answer", ""),
@@ -1042,11 +1073,17 @@ def ask(req: AskReq):
         if mapped_menu is not None:
             question = mapped_menu
 
+        print("QUESTION AFTER MENU MAPPING =", question, flush=True)
+
         if state == "menu" and question not in ALLOWED_MENU_CHOICES:
+            print("INVALID MENU CHOICE - RETURN MENU", flush=True)
             return menu_response()
 
         if question == "1":
+            print("OPTION 1 - BEFORE SAVE SESSION", flush=True)
             save_session(passenger_id, session_id, GENERAL_STATE, session.get("data", {}) or {})
+            print("OPTION 1 - AFTER SAVE SESSION", flush=True)
+
             return {
                 "matched_faq_id": None,
                 "answer": "تم. ارسلي سؤالك العام وانا اجاوبك.",
@@ -1055,6 +1092,8 @@ def ask(req: AskReq):
             }
 
         if question == "2":
+            print("OPTION 2 - LOST FOUND START", flush=True)
+
             reply_text = handle_lost_found_flow(
                 session_id=session_id,
                 user_message="menu",
@@ -1082,11 +1121,17 @@ def ask(req: AskReq):
             }
 
         if question == "3":
+            print("OPTION 3 - SCHEDULE START", flush=True)
+
             data = session.get("data", {}) or {}
             stations = _load_stations()
             options, opt_map = _schedule_station_options(stations, limit=STATION_OPTIONS_COUNT)
             data["sch_station_opt_map"] = opt_map
+
+            print("OPTION 3 - BEFORE SAVE SESSION", flush=True)
             save_session(passenger_id, session_id, SCH_CHOOSE_STATION, data)
+            print("OPTION 3 - AFTER SAVE SESSION", flush=True)
+
             return {
                 "matched_faq_id": None,
                 "answer": "تمام. اختاري/اكتبي اسم المحطة عشان اعرض لك اقرب الرحلات القادمة.",
@@ -1096,8 +1141,14 @@ def ask(req: AskReq):
             }
 
         if question == "4":
+            print("OPTION 4 - ROUTE START", flush=True)
+
             data = session.get("data", {}) or {}
+
+            print("OPTION 4 - BEFORE SAVE SESSION", flush=True)
             save_session(passenger_id, session_id, RT_ASK_DEST, data)
+            print("OPTION 4 - AFTER SAVE SESSION", flush=True)
+
             return {
                 "matched_faq_id": None,
                 "answer": "وين تبي تروح؟",
@@ -1105,17 +1156,26 @@ def ask(req: AskReq):
                 "type": "text"
             }
 
-        # ← جديد: خيار 5
         if question == "5":
+            print("OPTION 5 - TRACK START", flush=True)
+
+            print("OPTION 5 - BEFORE SAVE SESSION", flush=True)
             save_session(passenger_id, session_id, TRACK_STATE, {})
+            print("OPTION 5 - AFTER SAVE SESSION", flush=True)
+
             return track_flow(
                 passenger_id=passenger_id,
                 session_id=session_id,
                 user_message=question,
             )
 
+        print("FALLBACK FAQ - BEFORE FETCH FAQ", flush=True)
         faqs = fetch_all_faq()
+        print("FALLBACK FAQ - FAQ FETCHED", flush=True)
+
         result = ask_llm(question, faqs)
+        print("FALLBACK FAQ - LLM DONE", flush=True)
+
         return {
             "matched_faq_id": result.get("matched_faq_id", None),
             "answer": result.get("answer", ""),
@@ -1124,6 +1184,8 @@ def ask(req: AskReq):
         }
 
     except Exception as e:
+        print("ASK ERROR", type(e).__name__, str(e), flush=True)
+
         return {
             "matched_faq_id": None,
             "answer": f"SERVER_ERROR: {type(e).__name__}: {str(e)}",
@@ -1142,11 +1204,15 @@ async def upload_image(
     session_id: str = Form(...),
     ticket_id: str | None = Form(None),
 ):
+    print("UPLOAD IMAGE STARTED", passenger_id, session_id, ticket_id, flush=True)
+
     photo_url = await upload_lost_found_image(
         file=file,
         passenger_id=passenger_id,
         ticket_id=ticket_id
     )
+
+    print("UPLOAD IMAGE DONE", photo_url, flush=True)
 
     session = get_session(passenger_id, session_id)
     data = session.get("data", {}) or {}
